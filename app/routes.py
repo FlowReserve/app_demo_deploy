@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, redirect, url_for, jsonify, request, session, current_app as app, send_from_directory
+from flask import Blueprint, render_template, redirect, url_for, jsonify, send_file, request, session, current_app as app, send_from_directory
 from app.models import db, bcrypt, User, File, Patient, Request, Invitation
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 from werkzeug.utils import secure_filename
@@ -13,7 +13,7 @@ import os
 from datetime import datetime
 import string
 import random
-
+import zipfile
 
 main = Blueprint('main', __name__)
 
@@ -68,6 +68,21 @@ def register_user():
     # Devolver el token y el código QR en base64 al frontend
     return jsonify(access_token=access_token, qr_code_base64=img_base64), 201
 
+@main.route('/api/hash-password', methods=['POST'])
+def hash_password():
+    data = request.get_json()
+    password = data.get('password')
+
+    if not password:
+        return jsonify({'error': 'Password is required'}), 400
+
+    # Generar el hash de la contraseña
+    hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
+
+    # Devolver la contraseña hasheada
+    return jsonify({'hashed_password': hashed_password}), 200
+
+
 @main.route('/api/new_patient', methods=['POST'])
 @cross_origin()
 @jwt_required()  # Requiere autenticación
@@ -115,7 +130,7 @@ def login():
         else:
             # Si no tiene 2FA habilitado, generamos el token JWT de acceso completo
             access_token = create_access_token(identity={'id': user.id, 'email': user.email})
-            return jsonify(access_token=access_token), 200
+            return jsonify(access_token=access_token, role=user.role), 200
     else:
         return jsonify(message="Invalid credentials"), 401
 
@@ -140,9 +155,146 @@ def get_users():
         users_list.append({
             'id': user.id,
             'username': user.firstName + " " + user.lastName,
+            'firstName': user.firstName,
+            'lastName': user.lastName,
             'email': user.email
         })
     return jsonify(users_list)  # Retorna la lista de usuarios en formato JSON
+
+@main.route('/api/all-requests', methods=['GET'])
+@cross_origin()
+def get_all_requests():
+    requests = Request.query.all()  # Consulta todos los usuarios en la base de datos
+
+    requests = Request.query.all()
+
+    request_list = [
+        {
+            'id': r.id,
+            'nhc_patient': r.nhc_patient,
+            'date': r.date,
+            'state': r.state  # Mapeo del estado a su string
+        }
+        for r in requests
+    ]
+
+    return jsonify(request_list), 200
+
+@main.route('/api/update-request/<int:request_id>', methods=['PUT'])
+@jwt_required()
+def update_request(request_id):
+    try:
+        data = request.get_json()
+
+        if not data:
+            return jsonify({"error": "No se recibieron datos"}), 400
+
+        print("Datos recibidos del frontend:", data)
+
+        # Obtener el nuevo estado y otros campos
+        new_state = data.get('state')
+        nhc_patient = data.get('nhc_patient')
+
+        if new_state is None or nhc_patient is None:
+            return jsonify({"error": "Faltan campos obligatorios"}), 400
+
+
+        # Buscar la solicitud por ID
+        request_to_update = Request.query.get(request_id)
+
+        if not request_to_update:
+            return jsonify({"error": "Solicitud no encontrada"}), 404
+
+        # Actualizar los datos de la solicitud
+        request_to_update.state = int(new_state)
+        request_to_update.nhc_patient = nhc_patient
+
+        # Guardar cambios en la base de datos
+        db.session.commit()
+
+        return jsonify({"message": "Solicitud actualizada con éxito", "request": {
+            "id": request_to_update.id,
+            "state": request_to_update.state,
+            "nhc_patient": request_to_update.nhc_patient,
+            "date": request_to_update.date.isoformat()
+        }}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print("Error en el servidor:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+@main.route('/api/request/<int:request_id>/edit', methods=['PUT'])
+@jwt_required()
+def edit_request(request_id):
+    try:
+        data = request.get_json()
+        nhc_patient = data.get('nhc_patient')
+        date_str = data.get('date')
+
+        if nhc_patient is None or date_str is None:
+            return jsonify({"error": "Campos obligatorios faltantes"}), 400
+
+        # Convertir la fecha a objeto datetime
+        date_obj = datetime.strptime(date_str, '%a, %d %b %Y %H:%M:%S %Z')
+
+        request_to_update = Request.query.get(request_id)
+
+        if not request_to_update:
+            return jsonify({"error": "Solicitud no encontrada"}), 404
+
+        # Actualizar los datos del formulario
+        request_to_update.nhc_patient = nhc_patient
+        request_to_update.date = date_obj
+
+        db.session.commit()
+
+        return jsonify({"message": "Solicitud actualizada con éxito", "request": {
+            "nhc_patient": request_to_update.nhc_patient,
+            "date": request_to_update.date.isoformat()
+        }}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+@main.route('/api/request/<int:request_id>/update-state', methods=['PUT'])
+@jwt_required()
+def update_request_state(request_id):
+    try:
+        data = request.get_json()
+        new_state = data.get('state')
+
+        if new_state is None:
+            return jsonify({"error": "El campo 'state' es requerido"}), 400
+
+        request_to_update = Request.query.get(request_id)
+
+        if not request_to_update:
+            return jsonify({"error": "Solicitud no encontrada"}), 404
+
+        # Actualizar el estado de la solicitud
+        request_to_update.state = int(new_state)
+        db.session.commit()
+
+        # Devolver la solicitud actualizada
+        return jsonify({
+            "message": "Estado actualizado con éxito",
+            "request": {
+                "id": request_to_update.id,
+                "state": request_to_update.state,
+                "nhc_patient": request_to_update.nhc_patient,
+                "date": request_to_update.date.isoformat()
+            }
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 @main.route('/api/patients', methods=['GET'])
 @cross_origin()
@@ -196,7 +348,8 @@ def get_current_user():
         user_data = {
             'id': current_user.id,
             'full_name': current_user.firstName + " " + current_user.lastName,
-            'email': current_user.email
+            'email': current_user.email,
+            'role': current_user.role
         }
         return jsonify(user_data)
     else:
@@ -382,6 +535,7 @@ def create_request():
                 request_id=new_request.id
             )
             db.session.add(new_file)
+            
 
     db.session.commit()
 
@@ -434,3 +588,61 @@ def generate_invitation():
     db.session.commit()
 
     return jsonify({'invitation_code': invitation_code}), 201
+
+@main.route('/api/user/<int:user_id>', methods=['PUT'])
+@jwt_required()
+def update_user(user_id):
+    data = request.get_json()
+
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    # Actualizar los campos del usuario
+    user.firstName = data.get('firstName', user.firstName)
+    user.lastName = data.get('lastName', user.lastName)
+    user.email = data.get('email', user.email)
+
+    # Concatenar firstName y lastName para actualizar el username
+    user.username = f"{user.firstName} {user.lastName}"
+
+    try:
+        db.session.commit()
+        return jsonify({"message": "Usuario actualizado con éxito", "user": {
+            "id": user.id,
+            "firstName": user.firstName,
+            "lastName": user.lastName,
+            "username": user.username,  # Este campo concatenado
+            "email": user.email
+        }}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@main.route('/api/request/<int:request_id>/download-files', methods=['GET'])
+@jwt_required()
+def download_files(request_id):
+    # Obtener la solicitud y los archivos asociados desde la base de datos
+    request = Request.query.get(request_id)
+
+    if not request:
+        return jsonify({"error": "Solicitud no encontrada"}), 404
+
+    # Suponiendo que tienes un modelo "Archivo" relacionado con "Request"
+    files = File.query.filter_by(request_id=request_id).all()
+
+    if not files:
+        return jsonify({"error": "No hay archivos asociados a esta solicitud"}), 404
+
+    # Crear un archivo ZIP en memoria
+    memory_file = BytesIO()
+    with zipfile.ZipFile(memory_file, 'w') as zf:
+        for archivo in files:
+            # Ruta del archivo en el servidor
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], archivo.filepath)
+            zf.write(file_path, os.path.basename(file_path))  # Añadir archivo al ZIP
+
+    memory_file.seek(0)
+
+    # Devolver el archivo ZIP al frontend
+    return send_file(memory_file, download_name='files_request_{}.zip'.format(request_id), as_attachment=True)
