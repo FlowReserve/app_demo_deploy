@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  flask:
+    build: .
+    command: flask run --host=0.0.0.0
+    volumes:
+      - .:/app
+      - ./instance:/app/instance
+    env_file:
+      - .env
+    environment:
+      - FLASK_ENV=development
+    ports:
+      - "5000:5000"
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./static/build:/app/static/build
+    ports:
+      - "80:80"
+    depends_on:
+      - flask
