@@ -1,6 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from datetime import datetime
+from marshmallow import fields
 
 db = SQLAlchemy()
 bcrypt = Bcrypt()
@@ -59,6 +60,20 @@ class File(db.Model):
 
     def __repr__(self):
         return f"File('{self.filename}', '{self.extension}', '{self.filepath}', '{self.upload_date}')"
+
+class Report(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(100), nullable=False)
+    filepath = db.Column(db.String(200), nullable=False)
+    upload_date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    
+    # Referencia a la solicitud (Request)
+    request_id = db.Column(db.Integer, db.ForeignKey('request.id'), nullable=False)
+    request = db.relationship('Request', backref=db.backref('reports', lazy=True))
+
+    def __repr__(self):
+        return f"<Report {self.filename} uploaded at {self.upload_date}>"
+
 
 class Invitation(db.Model):
     id = db.Column(db.Integer, primary_key=True)

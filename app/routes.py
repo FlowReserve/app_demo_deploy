@@ -1,5 +1,5 @@
 from flask import Blueprint, render_template, redirect, url_for, jsonify, send_file, request, session, current_app as app, send_from_directory
-from app.models import db, bcrypt, User, File, Patient, Request, Invitation
+from app.models import db, bcrypt, User, File, Patient, Request, Invitation, Report
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 from werkzeug.utils import secure_filename
 from flask_cors import cross_origin
@@ -172,8 +172,9 @@ def get_all_requests():
         {
             'id': r.id,
             'nhc_patient': r.nhc_patient,
-            'date': r.date,
-            'state': r.state  # Mapeo del estado a su string
+            'date': r.date.strftime('%d/%m/%y'),
+            'state': r.state,  # Mapeo del estado a su string
+            'pressure': r.pressure
         }
         for r in requests
     ]
@@ -294,7 +295,63 @@ def update_request_state(request_id):
         return jsonify({"error": str(e)}), 500
 
 
+@main.route('/api/upload_report', methods=['POST'])
+def upload_report():
+    # Verificar si el archivo PDF está presente en la solicitud
+    if 'pdf' not in request.files:
+        return jsonify({"error": "No file part"}), 400
 
+    file = request.files['pdf']
+    request_id = request.form.get('request_id')
+
+    # Verificar si se proporcionó un archivo y un request_id válido
+    if not request_id:
+        return jsonify({"error": "No request ID provided"}), 400
+
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    # Verificar si el archivo tiene la extensión permitida
+    if file and allowed_file(file.filename):
+        try:
+            # Verificar que la solicitud exista en la base de datos
+            request_obj = Request.query.get(request_id)
+            if not request_obj:
+                return jsonify({"error": "Request not found"}), 404
+
+            # Verificar si el estado de la solicitud ya es "Disponible para descargar"
+            if request_obj.state == 'Disponible para descargar':
+                return jsonify({"error": "PDF already uploaded and available for download"}), 400
+
+            # Guardar el archivo PDF en el servidor
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+
+            # Crear una nueva entrada en la tabla Reports
+            report = Report(
+                filename=filename,
+                filepath=filepath,
+                request_id=request_id
+            )
+            db.session.add(report)
+
+            # Cambiar el estado de la solicitud a "Disponible para descargar"
+            request_obj.state = 4
+
+            # Guardar los cambios en la base de datos
+            db.session.commit()
+
+            return jsonify({"message": "File uploaded successfully", "state": "Disponible para descargar"}), 200
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    return jsonify({"error": "File type not allowed"}), 400
+
+# Función auxiliar para validar que el archivo sea PDF
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() == 'pdf'
 
 @main.route('/api/patients', methods=['GET'])
 @cross_origin()
@@ -393,7 +450,32 @@ def upload_file():
         return jsonify({"message": "File uploaded successfully", "file_path": file_path}), 201
     else:
         return jsonify({"error": "File type not allowed"}), 400
+
+@main.route('/api/request/<int:request_id>/download-report', methods=['GET'])
+def download_report(request_id):
+    # Buscar la solicitud en la base de datos
+    request_obj = Request.query.get(request_id)
     
+    if not request_obj:
+        return jsonify({"error": "Request not found"}), 404
+
+    # Buscar el reporte asociado a la solicitud
+    report = Report.query.filter_by(request_id=request_id).first()
+    
+    if not report:
+        return jsonify({"error": "Report not found"}), 404
+
+    # Verificar que el archivo PDF existe en el sistema de archivos
+    filepath = report.filepath
+    if not os.path.exists(filepath):
+        return jsonify({"error": "File not found on server"}), 404
+
+    try:
+        # Usar send_file para enviar el archivo PDF al cliente
+        return send_file(filepath, as_attachment=True, download_name=report.filename)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @main.route('/api/files', methods=['GET'])
 @jwt_required()
 def get_files():
