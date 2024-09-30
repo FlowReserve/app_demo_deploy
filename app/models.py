@@ -1,7 +1,6 @@
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from datetime import datetime
-from marshmallow import fields
 
 db = SQLAlchemy()
 bcrypt = Bcrypt()
