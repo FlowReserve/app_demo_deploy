@@ -25,7 +25,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 app.config['SESSION_COOKIE_HTTPONLY'] = True   # Para evitar acceso desde JavaScript
 app.config['SESSION_COOKIE_SECURE'] = True     # Para que la cookie solo se envíe por HTTPS
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # Protección contra CSRF
+app.config['SESSION_COOKIE_SAMESITE'] = 'None'  # Protección contra CSRF
 
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
