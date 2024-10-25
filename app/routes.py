@@ -10,10 +10,11 @@ import qrcode
 from io import BytesIO
 import base64
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import string
 import random
 import zipfile
+from io import BytesIO
 
 main = Blueprint('main', __name__)
 
@@ -84,55 +85,49 @@ def hash_password():
 
 
 @main.route('/api/new_patient', methods=['POST'])
-@cross_origin()
-@jwt_required()  # Requiere autenticación
 def add_patient():
-    try:
-        # Obtener el diccionario completo desde el token JWT
-        current_user_data = get_jwt_identity()
+    # Verificar si el usuario tiene una sesión activa
+    if 'user_id' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
 
-        # Asegurarse de que obtienes el correo electrónico desde el diccionario
-        current_user_email = current_user_data['email'] if isinstance(current_user_data, dict) else current_user_data
+    data = request.get_json()
+    nhc = data.get('nhc')
 
-        # Obtener los datos enviados por el usuario
-        data = request.get_json()
+    if not nhc:
+        return jsonify({'message': 'NHC es requerido.'}), 400
 
-        # Validar que el campo 'nhc' esté presente en la solicitud
-        if not data or 'nhc' not in data:
-            return jsonify(message="NHC es requerido"), 400
+    # Añadir el paciente a la base de datos
+    new_patient = Patient(nhc=nhc, user_email=session['user_email'])
+    db.session.add(new_patient)
+    db.session.commit()
 
-        nhc = data['nhc']
+    return jsonify({'message': 'Paciente añadido exitosamente.', 'patient_id': new_patient.id}), 201
 
-        # Crear una nueva instancia de Patient con el email del usuario
-        new_patient = Patient(nhc=nhc, user_email=current_user_email)
-
-        # Añadir el nuevo paciente a la base de datos
-        db.session.add(new_patient)
-        db.session.commit()
-
-        return jsonify(message="Paciente añadido exitosamente", patient_id=new_patient.id), 201
-
-    except Exception as e:
-        db.session.rollback()  # Revertir la transacción en caso de error
-        return jsonify(message="Error añadiendo paciente", error=str(e)), 500
 
 # to log in to the app
 @main.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
     user = User.query.filter_by(email=data['email']).first()
-    
+
     if user and bcrypt.check_password_hash(user.password, data['password']):
         if user.two_factor_enabled:
-            # En lugar de usar la sesión, devolvemos un token temporal con el user_id
-            temp_token = create_access_token(identity={'user_id': user.id}, expires_delta=False)
-            return jsonify(message="2FA required", temp_token=temp_token), 202  # Código 202 para indicar que falta 2FA
+            # Marcar en la sesión que se requiere 2FA, pero aún no autenticar completamente al usuario
+            session['user_id'] = user.id
+            session['2fa_required'] = True  # Señalar que aún no se ha completado 2FA
+            return jsonify(message="2FA required"), 202  # Código 202 para indicar que falta 2FA
         else:
-            # Si no tiene 2FA habilitado, generamos el token JWT de acceso completo
-            access_token = create_access_token(identity={'id': user.id, 'email': user.email})
-            return jsonify(access_token=access_token, role=user.role), 200
+            # No se requiere 2FA, autenticamos normalmente
+            session['user_id'] = user.id
+            session['user_email'] = user.email
+            session['user_role'] = user.role
+            session.permanent = True  # Mantener la sesión activa durante el tiempo definido
+            app.permanent_session_lifetime = timedelta(days=7)  # Duración de la sesión (en este caso, 7 días)
+            print(session)
+            return jsonify(message="successful", role=user.role), 200
     else:
         return jsonify(message="Invalid credentials"), 401
+
 
 
 
@@ -149,6 +144,15 @@ if __name__ == '__main__':
 # lists all the users stored inside the database
 @main.route('/api/users', methods=['GET'])
 def get_users():
+    # Verificar si el usuario tiene una sesión activa
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Verificar si el usuario tiene privilegios de administrador (opcional)
+    if session.get('user_role') != 1:
+        return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
+
+    # Obtener la lista de todos los usuarios
     users = User.query.all()  # Consulta todos los usuarios en la base de datos
     users_list = []
     for user in users:
@@ -159,15 +163,21 @@ def get_users():
             'lastName': user.lastName,
             'email': user.email
         })
-    return jsonify(users_list)  # Retorna la lista de usuarios en formato JSON
+    
+    # Retornar la lista de usuarios en formato JSON
+    return jsonify(users_list), 200
+
 
 @main.route('/api/all-requests', methods=['GET'])
-@cross_origin()
 def get_all_requests():
-    requests = Request.query.all()  # Consulta todos los usuarios en la base de datos
+    # Verificar si el usuario tiene una sesión activa
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
 
+    # Obtener todas las solicitudes de la base de datos
     requests = Request.query.all()
 
+    # Crear una lista con la información de las solicitudes
     request_list = [
         {
             'id': r.id,
@@ -179,12 +189,34 @@ def get_all_requests():
         for r in requests
     ]
 
+    # Devolver la lista de solicitudes en formato JSON
     return jsonify(request_list), 200
 
+
+@main.route('/api/logout', methods=['POST'])
+def logout():
+    # Limpia la sesión actual del usuario
+    session.clear()  # Elimina todos los datos de la sesión
+
+    # Devuelve una respuesta al cliente indicando que el logout fue exitoso
+    response = jsonify(message="Logout successful")
+    
+    # Configura la cookie de sesión para que expire
+    response.set_cookie('session', '', expires=0)
+
+    return response, 200
+
 @main.route('/api/update-request/<int:request_id>', methods=['PUT'])
-@jwt_required()
 def update_request(request_id):
     try:
+
+        if 'user_email' not in session:
+            return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Verificar si el usuario tiene privilegios de administrador (opcional)
+        if session.get('user_role') != 1:
+            return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
+       
         data = request.get_json()
 
         if not data:
@@ -261,9 +293,16 @@ def edit_request(request_id):
 
 
 @main.route('/api/request/<int:request_id>/update-state', methods=['PUT'])
-@jwt_required()
 def update_request_state(request_id):
     try:
+
+        if 'user_email' not in session:
+            return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Verificar si el usuario tiene privilegios de administrador (opcional)
+        if session.get('user_role') != 1:
+            return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
+
         data = request.get_json()
         new_state = data.get('state')
 
@@ -297,6 +336,15 @@ def update_request_state(request_id):
 
 @main.route('/api/upload_report', methods=['POST'])
 def upload_report():
+
+    if 'user_email' not in session:
+            return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Verificar si el usuario tiene privilegios de administrador (opcional)
+    if session.get('user_role') != 1:
+            return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
+    
+
     # Verificar si el archivo PDF está presente en la solicitud
     if 'pdf' not in request.files:
         return jsonify({"error": "No file part"}), 400
@@ -354,12 +402,13 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() == 'pdf'
 
 @main.route('/api/patients', methods=['GET'])
-@cross_origin()
-@jwt_required()
 def get_patients_for_user():
-    # Obtener el email del usuario autenticado desde el token JWT
-    current_user_data = get_jwt_identity()
-    current_user_email = current_user_data['email'] if isinstance(current_user_data, dict) else current_user_data
+    # Verificar si el usuario tiene una sesión activa
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Obtener el email del usuario autenticado desde la sesión
+    current_user_email = session['user_email']
 
     # Filtrar los pacientes por el email del usuario autenticado
     patients = Patient.query.filter_by(user_email=current_user_email).all()
@@ -368,6 +417,7 @@ def get_patients_for_user():
     patient_list = [{'id': p.id, 'nhc': p.nhc, 'user_email': p.user_email} for p in patients]
 
     return jsonify(patient_list), 200
+
 
 @main.route('/api/patients/<nhc>', methods=['GET'])
 @cross_origin()
@@ -396,21 +446,30 @@ def get_patient_by_nhc(nhc):
 
 
 @main.route('/api/user', methods=['GET'])
-@jwt_required()
 def get_current_user():
-    current_user_identity = get_jwt_identity()
-    current_user = User.query.filter_by(email=current_user_identity['email']).first()
+    # Verificar si el usuario está autenticado revisando la sesión
+    print(session)
+
+    if 'user_email' not in session:
+        return jsonify({'message': 'User not authenticated'}), 401
+
+    # Obtener el email del usuario desde la sesión
+    user_email = session.get('user_email')
+
+    # Buscar el usuario en la base de datos por su email
+    current_user = User.query.filter_by(email=user_email).first()
 
     if current_user:
+        # Devolver la información del usuario en formato JSON
         user_data = {
             'id': current_user.id,
             'full_name': current_user.firstName + " " + current_user.lastName,
             'email': current_user.email,
             'role': current_user.role
         }
-        return jsonify(user_data)
+        return jsonify(user_data), 200
     else:
-        return jsonify({'message': 'User not found'})
+        return jsonify({'message': 'User not found'}), 404
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'txt', 'docx', 'vtp'}
 def allowed_file(filename):
@@ -454,6 +513,8 @@ def upload_file():
 @main.route('/api/request/<int:request_id>/download-report', methods=['GET'])
 def download_report(request_id):
     # Buscar la solicitud en la base de datos
+
+    
     request_obj = Request.query.get(request_id)
     
     if not request_obj:
@@ -528,22 +589,12 @@ def enable_2fa():
         return jsonify(message="2FA already enabled"), 400
 
 @main.route('/api/verify-2fa', methods=['POST'])
-@cross_origin()
 def verify_2fa():
-    # Obtener el temp_token del encabezado de la solicitud o el cuerpo
-    temp_token = request.headers.get('Authorization', '').replace('Bearer ', '')
+    # Verificar que 2FA es requerido y que el usuario está autenticado parcialmente
+    if '2fa_required' not in session or 'user_id' not in session:
+        return jsonify(message="2FA not required or session invalid"), 400
 
-    if not temp_token:
-        return jsonify(message="Missing temporary token"), 400
-
-    try:
-        # Decodificamos el token temporal para obtener el user_id
-        decoded_token = decode_token(temp_token)
-        user_id = decoded_token['sub']['user_id']
-    except Exception as e:
-        return jsonify(message="Invalid or expired temporary token", error=str(e)), 400
-    
-    # Ahora buscamos al usuario en la base de datos usando el user_id
+    user_id = session['user_id']
     user = User.query.filter_by(id=user_id).first()
 
     if not user or not user.two_factor_enabled:
@@ -554,12 +605,19 @@ def verify_2fa():
 
     # Verificar el código TOTP
     totp = pyotp.TOTP(user.two_factor_secret)
+
     if totp.verify(code):
-        # Si el código es válido, generamos el JWT completo
-        access_token = create_access_token(identity={'id': user.id, 'email': user.email})
-        return jsonify(access_token=access_token), 200
+        # Si el código es válido, completar la autenticación
+        session['user_email'] = user.email
+        session['user_role'] = user.role
+        session.pop('2fa_required')  # Eliminar el estado de 2FA requerido
+        session.permanent = True
+        app.permanent_session_lifetime = timedelta(days=7)  # Mantener la sesión durante 7 días
+
+        return jsonify(message="2FA verified, login successful"), 200
     else:
         return jsonify(message="Invalid 2FA code"), 400
+
 
 @main.route('/dashboard', methods=['GET'])
 @jwt_required()
@@ -568,11 +626,14 @@ def dashboard():
     return jsonify(message=f"Welcome {current_user['email']}"), 200
 
 @main.route('/api/requests', methods=['POST'])
-@jwt_required()
-@cross_origin()
 def create_request():
-    current_user = get_jwt_identity()  # Obtener el usuario logueado
-    print(current_user)
+    # Verificar si el usuario tiene una sesión activa
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Obtener el email del usuario autenticado desde la sesión
+    current_user_email = session['user_email']
+    
     nhc_patient = request.form.get('nhc_patient')  # Obtener el NHC del paciente
     pressure = request.form.get('pressure')
     state = request.form.get('state', 0)  # Obtener el estado de la solicitud
@@ -584,7 +645,7 @@ def create_request():
 
     # Crear la solicitud (Request)
     new_request = Request(
-        user_email=current_user['email'],
+        user_email=current_user_email,
         nhc_patient=nhc_patient,
         state=state,
         date=datetime.utcnow(),
@@ -613,21 +674,23 @@ def create_request():
                 filename=unique_filename,
                 extension=extension.replace(".", ""),  # Remover el punto de la extensión
                 filepath=filepath,
-                user_id=current_user['id'],
+                user_id=session['user_id'],  # Obtener el user_id desde la sesión
                 request_id=new_request.id
             )
             db.session.add(new_file)
-            
 
     db.session.commit()
 
     return jsonify(message="Solicitud creada exitosamente", request_id=new_request.id), 201
 
 
+
 @main.route('/api/get_request', methods=['GET'])
-@cross_origin()
-@jwt_required()
 def get_requests_for_user():
+    # Verificar si el usuario tiene una sesión activa
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
+
     # Definir el mapeo de los estados
     state_mapping = {
         0: "Solicitud realizada",
@@ -637,11 +700,13 @@ def get_requests_for_user():
         4: "Completada"
     }
 
-    current_user_data = get_jwt_identity()
-    current_user_email = current_user_data['email'] if isinstance(current_user_data, dict) else current_user_data
+    # Obtener el email del usuario autenticado desde la sesión
+    current_user_email = session['user_email']
 
+    # Filtrar las solicitudes por el email del usuario autenticado
     requests = Request.query.filter_by(user_email=current_user_email).all()
 
+    # Crear una lista para enviar las solicitudes en formato JSON
     request_list = [
         {
             'id': r.id,
@@ -662,18 +727,34 @@ def generate_invitation_code(length=8):
 # Ruta para generar y devolver el código de invitación
 @main.route('/api/generate-invitation', methods=['POST'])
 def generate_invitation():
-    invitation_code = generate_invitation_code()  # Generar el código
+    # Verificar si el usuario tiene una sesión activa y tiene el rol correcto
+    role = session.get('user_role')
+
+    # Si el usuario no es un admin (rol != 1), devolver un error de autorización
+    if role != 1:
+        return jsonify({'error': 'Unauthorized. Only admins can generate invitation codes.'}), 403
+
+    # Generar el código de invitación solo si el rol es 1 (admin)
+    invitation_code = generate_invitation_code()
 
     # Guardar el código en la base de datos
-    new_invitation = Invitation(code=invitation_code, is_used=False)  # 'used' para saber si se ha utilizado
+    new_invitation = Invitation(code=invitation_code, is_used=False)
     db.session.add(new_invitation)
     db.session.commit()
 
     return jsonify({'invitation_code': invitation_code}), 201
 
+
 @main.route('/api/user/<int:user_id>', methods=['PUT'])
-@jwt_required()
 def update_user(user_id):
+
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
+
+    # Verificar si el usuario tiene privilegios de administrador (opcional)
+    if session.get('user_role') != 1:
+        return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
+
     data = request.get_json()
 
     user = User.query.get(user_id)
@@ -702,15 +783,31 @@ def update_user(user_id):
         return jsonify({"error": str(e)}), 500
 
 @main.route('/api/request/<int:request_id>/download-files', methods=['GET'])
-@jwt_required()
 def download_files(request_id):
     # Obtener la solicitud y los archivos asociados desde la base de datos
-    request = Request.query.get(request_id)
 
-    if not request:
-        return jsonify({"error": "Solicitud no encontrada"}), 404
+    if 'user_email' not in session:
+        return jsonify({'message': 'No estás autenticado.'}), 401
 
-    # Suponiendo que tienes un modelo "Archivo" relacionado con "Request"
+    # Verificar si el usuario tiene privilegios de administrador (opcional)
+    if session.get('user_role') != 1:
+        return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
+
+    request_obj = Request.query.get(request_id)
+    
+    
+    if not request_obj:
+        return jsonify({"error": "Request not found"}), 404
+
+    # Generar el contenido para el archivo de texto
+    content = f"Paciente - {request_obj.nhc_patient}\n"
+    content += f"Rama Lesion - por definir\n"
+    content += f"PAS - {request_obj.pressure[:3]}\n"
+    content += f"PAD - {request_obj.pressure[-3:]}\n"
+    content += f"Hospital - por definir\n"
+    content += f"Fecha - {request_obj.date.strftime('%d/%m/%y')}\n"
+
+    # Obtener los archivos asociados a la solicitud
     files = File.query.filter_by(request_id=request_id).all()
 
     if not files:
@@ -719,12 +816,28 @@ def download_files(request_id):
     # Crear un archivo ZIP en memoria
     memory_file = BytesIO()
     with zipfile.ZipFile(memory_file, 'w') as zf:
+        # Escribir las carpetas vacías en el ZIP
+        zf.writestr('1_Datos/', '')
+        zf.writestr('2_Geometria/', '')
+        zf.writestr('3_Slicer/', '')
+        zf.writestr('4_Informe/', '')
+        zf.writestr('4_Informe/imagenes paciente/', '')
+
+        # Escribir el archivo de texto directamente en el ZIP
+        zf.writestr(f'4_Informe/paciente_{request_id}.txt', content)
+
+        # Añadir el archivo .xlsx al ZIP
+        xlsx_path = app.config['xlsx_template']
+        zf.write(xlsx_path, os.path.join('4_Informe', os.path.basename(xlsx_path)))
+
+        # Añadir los archivos asociados de la solicitud al ZIP
         for archivo in files:
-            # Ruta del archivo en el servidor
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], archivo.filepath)
-            zf.write(file_path, os.path.basename(file_path))  # Añadir archivo al ZIP
+            
+            # Añadir el archivo al ZIP dentro de la carpeta '1_Datos'
+            zf.write(file_path, os.path.join('1_Datos', os.path.basename(file_path)))
 
     memory_file.seek(0)
 
     # Devolver el archivo ZIP al frontend
-    return send_file(memory_file, download_name='files_request_{}.zip'.format(request_id), as_attachment=True)
+    return send_file(memory_file, download_name=f'files_request_{request_id}.zip', as_attachment=True)

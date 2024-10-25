@@ -11,7 +11,9 @@ class User(db.Model):
     lastName = db.Column(db.String(150), unique=False, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password = db.Column(db.String(100), nullable=False)
-    role = db.Column(db.Integer, nullable=False, default=1)
+    role = db.Column(db.Integer, nullable=False, default=0)
+    failed_attempts = db.Column(db.Integer, default=0)
+    locked_until = db.Column(db.DateTime, nullable=True)
 
     two_factor_enabled = db.Column(db.Boolean, default=True)
     two_factor_secret = db.Column(db.String(64))

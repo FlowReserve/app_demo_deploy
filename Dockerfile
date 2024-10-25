@@ -1,5 +1,16 @@
-# Usamos una imagen base de Python
-FROM python:3.9-slim
+# Usamos una imagen base de Python con Alpine Linux
+FROM python:3.11-alpine
+
+# Instalar dependencias del sistema necesarias para la compilación y MySQL
+RUN apk update && apk add --no-cache \
+    mariadb-connector-c-dev \
+    gcc \
+    g++ \
+    libffi-dev \
+    musl-dev \
+    openssl-dev \
+    make \
+    && rm -rf /var/cache/apk/*
 
 # Establecemos el directorio de trabajo en /app
 WORKDIR /app
