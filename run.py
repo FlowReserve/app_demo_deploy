@@ -40,6 +40,4 @@ if not os.path.exists(UPLOAD_FOLDER):
 app.register_blueprint(main)
 
 if __name__ == '__main__':
-    with app.app_context():  # Esto asegura que el contexto de la aplicación esté activo
-        db.create_all()  # Crear las tablas en la base de datos si no existen
     app.run(debug=True)
