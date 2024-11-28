@@ -1,4 +1,5 @@
 from flask import Blueprint, render_template, redirect, url_for, jsonify, send_file, request, session, current_app as app, send_from_directory
+from itsdangerous import URLSafeTimedSerializer
 from app.models import db, bcrypt, User, File, Patient, Request, Invitation, Report
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token
 from werkzeug.utils import secure_filename
@@ -15,8 +16,14 @@ import string
 import random
 import zipfile
 from io import BytesIO
+from flask_mail import Mail, Message
+import urllib.parse
+import re
 
 main = Blueprint('main', __name__)
+
+def get_serializer():
+    return URLSafeTimedSerializer(app.secret_key)
 
 # to register a new user into the database
 @main.route('/api/register', methods=['POST'])
@@ -33,6 +40,14 @@ def register_user():
     # Validar si ya existe un usuario con ese email
     if User.query.filter_by(email=data['email']).first():
         return jsonify(message="El correo electrónico ya está en uso."), 400
+
+    def is_valid_password(password):
+        # Al menos 8 caracteres, una letra, un número y un carácter especial
+        regex = r'^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?])[A-Za-z\d!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]{8,}$'
+        return re.match(regex, password) is not None
+
+    if not is_valid_password(data['password']):
+        return jsonify({'error': 'La contraseña debe tener al menos 8 caracteres, una letra, un número y un carácter especial.'}), 400
 
     # Crear un nuevo usuario
     new_user = User(
@@ -68,6 +83,73 @@ def register_user():
 
     # Devolver el token y el código QR en base64 al frontend
     return jsonify(access_token=access_token, qr_code_base64=img_base64), 201
+
+@main.route('/api/request-password-reset', methods=['POST'])
+def request_password_reset():
+    data = request.get_json()
+    print("Request data:", data)  # Agrega este print para ver los datos
+    user = User.query.filter_by(email=data.get('email')).first()
+
+    if not user:
+        return jsonify({'error': 'El correo no está registrado.'}), 404
+
+    reset_token = create_access_token(identity={'email': user.email}, expires_delta=timedelta(hours=1))
+    parsed_token = urllib.parse.quote(reset_token)
+
+    msg = Message(subject="Restablecimiento de contraseña",
+                  sender="agustin.dasilva@flowreserve.es",
+                  recipients=[user.email])
+    msg.body = f"Utiliza el siguiente enlace para restablecer tu contraseña: http://localhost:3000/static/password-reset?token={parsed_token}"
+
+    print("Sending email to:", user.email)  # Agrega este print para confirmar que el correo se está enviando
+
+    try:
+        app.extensions['mail'].send(msg)
+        print("Email sent successfully")  # Este mensaje debería aparecer si el correo se envió correctamente
+        return jsonify({'message': 'Se ha enviado un enlace de recuperación a tu correo electrónico.'}), 200
+    except Exception as e:
+        print("Error sending email:", e)  # Esto mostrará cualquier error con el correo
+        return jsonify({'error': 'Error al enviar el correo. Inténtelo de nuevo más tarde.'}), 500
+
+@main.route('/api/reset-password', methods=['POST'])
+def reset_password():
+    data = request.get_json()
+    token = data.get('token')
+    new_password = data.get('password')
+
+    if not token or not new_password:
+        return jsonify({'error': 'Token y contraseña son obligatorios'}), 400
+
+    try:
+        # Decodificar el token
+        decoded_token = decode_token(token)
+
+        # Extraer el email del token
+        email = decoded_token['sub']['email']
+
+        # Verificar si el usuario existe
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
+        
+        def is_valid_password(password):
+        # Al menos 8 caracteres, una letra, un número y un carácter especial
+            regex = r'^(?=.*[A-Za-z])(?=.*\d)(?=.*[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?])[A-Za-z\d!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]{8,}$'
+            return re.match(regex, password) is not None
+
+        if not is_valid_password(data['password']):
+            return jsonify({'error': 'La contraseña debe tener al menos 8 caracteres, una letra, un número y un carácter especial.'}), 400
+
+        # Actualizar la contraseña
+        user.password = bcrypt.generate_password_hash(new_password).decode('utf-8')
+        db.session.commit()
+
+        return jsonify({'message': 'Contraseña restablecida correctamente'}), 200
+
+    except Exception as e:
+        print(f"Error al decodificar el token: {str(e)}")  # Log del error
+        return jsonify({'error': 'El enlace es inválido o ha expirado'}), 400
+
 
 @main.route('/api/hash-password', methods=['POST'])
 def hash_password():
@@ -181,7 +263,7 @@ def get_all_requests():
     request_list = [
         {
             'id': r.id,
-            'nhc_patient': r.nhc_patient,
+            'nanoid': r.nanoid,
             'date': r.date.strftime('%d/%m/%y'),
             'state': r.state,  # Mapeo del estado a su string
             'pressure': r.pressure
@@ -209,14 +291,15 @@ def logout():
 @main.route('/api/update-request/<int:request_id>', methods=['PUT'])
 def update_request(request_id):
     try:
-
+        # Verificar si el usuario está autenticado
         if 'user_email' not in session:
             return jsonify({'message': 'No estás autenticado.'}), 401
 
-    # Verificar si el usuario tiene privilegios de administrador (opcional)
+        # Verificar si el usuario tiene privilegios de administrador
         if session.get('user_role') != 1:
             return jsonify({'message': 'No tienes permisos para acceder a esta información.'}), 403
-       
+
+        # Obtener los datos enviados desde el frontend
         data = request.get_json()
 
         if not data:
@@ -224,13 +307,19 @@ def update_request(request_id):
 
         print("Datos recibidos del frontend:", data)
 
-        # Obtener el nuevo estado y otros campos
+        # Obtener el nuevo estado y el nanoid
         new_state = data.get('state')
-        nhc_patient = data.get('nhc_patient')
+        nanoid = data.get('nanoid')
 
-        if new_state is None or nhc_patient is None:
-            return jsonify({"error": "Faltan campos obligatorios"}), 400
+        # Validar campos obligatorios
+        if new_state is None or nanoid is None:
+            return jsonify({"error": "Faltan campos obligatorios: state y nanoid son requeridos"}), 400
 
+        try:
+            # Asegurarse de que new_state sea un número entero
+            new_state = int(new_state)
+        except ValueError:
+            return jsonify({"error": "El estado debe ser un número válido"}), 400
 
         # Buscar la solicitud por ID
         request_to_update = Request.query.get(request_id)
@@ -239,23 +328,27 @@ def update_request(request_id):
             return jsonify({"error": "Solicitud no encontrada"}), 404
 
         # Actualizar los datos de la solicitud
-        request_to_update.state = int(new_state)
-        request_to_update.nhc_patient = nhc_patient
+        request_to_update.state = new_state
+        request_to_update.nanoid = nanoid
 
         # Guardar cambios en la base de datos
         db.session.commit()
 
-        return jsonify({"message": "Solicitud actualizada con éxito", "request": {
-            "id": request_to_update.id,
-            "state": request_to_update.state,
-            "nhc_patient": request_to_update.nhc_patient,
-            "date": request_to_update.date.isoformat()
-        }}), 200
+        return jsonify({
+            "message": "Solicitud actualizada con éxito",
+            "request": {
+                "id": request_to_update.id,
+                "state": request_to_update.state,
+                "nanoid": request_to_update.nanoid,
+                "date": request_to_update.date.isoformat()
+            }
+        }), 200
 
     except Exception as e:
         db.session.rollback()
         print("Error en el servidor:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 @main.route('/api/request/<int:request_id>/edit', methods=['PUT'])
 @jwt_required()
@@ -414,7 +507,7 @@ def get_patients_for_user():
     patients = Patient.query.filter_by(user_email=current_user_email).all()
 
     # Crear una lista para enviar los pacientes en formato JSON
-    patient_list = [{'id': p.id, 'nhc': p.nhc, 'user_email': p.user_email} for p in patients]
+    patient_list = [{'id': p.id, 'nhc': p.nhc, 'nanoid': p.nanoid, 'user_email': p.user_email} for p in patients]
 
     return jsonify(patient_list), 200
 
@@ -704,15 +797,51 @@ def get_requests_for_user():
     current_user_email = session['user_email']
 
     # Filtrar las solicitudes por el email del usuario autenticado
-    requests = Request.query.filter_by(user_email=current_user_email).all()
+    requests = Request.query.filter_by(user_email=current_user_email).order_by(Request.date.desc()).all()
 
     # Crear una lista para enviar las solicitudes en formato JSON
     request_list = [
         {
             'id': r.id,
             'nhc_patient': r.nhc_patient,
+            'nanoid': r.nanoid,
             'date': r.date,
             'state': state_mapping.get(r.state, "Estado Desconocido")  # Mapeo del estado a su string
+        }
+        for r in requests
+    ]
+
+    return jsonify(request_list), 200
+
+@main.route('/api/get_request_by_patient', methods=['POST'])
+def get_requests_by_patient():
+    if 'user_email' not in session:  # Verificar sesión activa
+        return jsonify({'message': 'No estás autenticado.'}), 401
+
+    data = request.get_json()  # Obtener datos del cuerpo
+    nhc_patient = data.get('nhc')  # Extraer el nhc
+
+    if not nhc_patient:
+        return jsonify({'message': 'NHC no proporcionado.'}), 400
+
+    # Definir mapeo de estados
+    state_mapping = {
+        0: "Solicitud realizada",
+        1: "Aceptada",
+        2: "Rechazada",
+        3: "En progreso",
+        4: "Completada"
+    }
+
+    # Filtrar solicitudes para el paciente
+    requests = Request.query.filter_by(nhc_patient=nhc_patient).order_by(Request.date.desc()).all()
+    request_list = [
+        {
+            'id': r.id,
+            'nhc_patient': r.nhc_patient,
+            'nanoid': r.nanoid,
+            'date': r.date,
+            'state': state_mapping.get(r.state, "Estado Desconocido")
         }
         for r in requests
     ]
@@ -800,7 +929,7 @@ def download_files(request_id):
         return jsonify({"error": "Request not found"}), 404
 
     # Generar el contenido para el archivo de texto
-    content = f"Paciente - {request_obj.nhc_patient}\n"
+    content = f"Paciente - {request_obj.nanoid}\n"
     content += f"Rama Lesion - por definir\n"
     content += f"PAS - {request_obj.pressure[:3]}\n"
     content += f"PAD - {request_obj.pressure[-3:]}\n"
@@ -832,6 +961,7 @@ def download_files(request_id):
 
         # Añadir los archivos asociados de la solicitud al ZIP
         for archivo in files:
+            # Ruta del archivo en el servidor
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], archivo.filepath)
             
             # Añadir el archivo al ZIP dentro de la carpeta '1_Datos'

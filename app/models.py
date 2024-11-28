@@ -1,6 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from datetime import datetime
+from nanoid import generate
 
 db = SQLAlchemy()
 bcrypt = Bcrypt()
@@ -29,11 +30,13 @@ class Patient(db.Model):
     # Relación de uno a muchos con Request
     requests = db.relationship('Request', backref='patient', lazy=True)
 
+    nanoid = db.Column(db.String(8), unique=True, nullable=False, default=lambda: f"PAT-{generate('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 8)}")
+
     # Relación con User (un usuario puede tener varios pacientes)
     user = db.relationship('User', backref=db.backref('patients', lazy=True))
 
     def __repr__(self):
-        return f"<Patient {self.nhc}>"
+        return f"<Patient {self.nhc} >"
         
 class Request(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -42,6 +45,7 @@ class Request(db.Model):
     date = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)  # Fecha de la solicitud
     state = db.Column(db.Integer, nullable=False, default=0)  # Estado de la solicitud (valores de 0 a 4)
     pressure = db.Column(db.String(10), nullable=False)
+    nanoid = db.Column(db.String(8), unique=True, nullable=False, default=lambda: f"FR-{generate('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 8)}")
 
     # Relación con los archivos (Request puede tener múltiples archivos)
     files = db.relationship('File', backref='request', lazy=True)
