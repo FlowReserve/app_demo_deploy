@@ -99,7 +99,7 @@ def request_password_reset():
     msg = Message(subject="Restablecimiento de contraseña",
                   sender="agustin.dasilva@flowreserve.es",
                   recipients=[user.email])
-    msg.body = f"Utiliza el siguiente enlace para restablecer tu contraseña: http://localhost:3000/static/password-reset?token={parsed_token}"
+    msg.body = f"Utiliza el siguiente enlace para restablecer tu contraseña: https://flowreserve.github.io/app_demo_deploy_front/#/static/password-reset?token={parsed_token}"
 
     print("Sending email to:", user.email)  # Agrega este print para confirmar que el correo se está enviando
 
